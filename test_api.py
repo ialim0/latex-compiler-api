@@ -6,7 +6,7 @@ import redis
 from rq import Queue
 
 # Import your FastAPI app
-from main import app, STORAGE_DIR, redis_conn, compile_latex, LatexRequest
+from main import app, STORAGE_DIR
 
 client = TestClient(app)
 
