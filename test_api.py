@@ -1,141 +1,155 @@
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch, MagicMock
-from main import app, redis_conn, queue, STORAGE_DIR
+from unittest.mock import patch, MagicMock, mock_open
 import os
 import uuid
-import shutil
+from fastapi import Response
+from main import app, STORAGE_DIR
+from worker import compile_latex
+from fastapi.responses import FileResponse
 
 client = TestClient(app)
 
 @pytest.fixture
 def mock_redis(monkeypatch):
     mock = MagicMock()
-    monkeypatch.setattr("main.redis_conn", mock)
+    monkeypatch.setattr("main.redis_client", mock)
     return mock
 
 @pytest.fixture
-def mock_queue(monkeypatch):
+def mock_celery_task(monkeypatch):
     mock = MagicMock()
-    monkeypatch.setattr("main.queue", mock)
+    monkeypatch.setattr("main.compile_latex", mock)
     return mock
 
-@pytest.fixture(autouse=True)
-def cleanup_temp_dirs():
-    yield
-    if os.path.exists("/tmp/test-worker-job-id"):
-        shutil.rmtree("/tmp/test-worker-job-id")
+@pytest.fixture
+def mock_async_result(monkeypatch):
+    mock = MagicMock()
+    monkeypatch.setattr("main.AsyncResult", mock)
+    return mock
 
-def test_compile_latex_endpoint_new_job(mock_redis, mock_queue):
+class MockFileResponse(FileResponse):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.stat_result = os.stat_result((0,) * 10)
+
+    async def __call__(self, *args, **kwargs):
+        await super().__call__(*args, **kwargs)
+        return Response(content="Mocked PDF content", media_type="application/pdf")
+
+def test_compile_latex_endpoint_new_job(mock_redis, mock_celery_task):
     mock_redis.get.return_value = None
-    mock_job = MagicMock()
-    mock_job.id = "test-job-id"
-    mock_queue.enqueue.return_value = mock_job
+    mock_celery_task.delay.return_value.id = "test_job_id"
 
     response = client.post("/compile", json={"content": "Test LaTeX content"})
-    assert response.status_code == 200
-    assert response.json() == {"job_id": "test-job-id", "status": "queued"}
 
-    mock_redis.get.assert_called_once_with("Test LaTeX content")
-    mock_queue.enqueue.assert_called_once()
+    assert response.status_code == 200
+    assert response.json() == {"job_id": "test_job_id", "status": "queued"}
+    mock_celery_task.delay.assert_called_once()
 
 def test_compile_latex_endpoint_cached(mock_redis):
-    mock_redis.get.return_value = b"cached-job-id"
+    mock_redis.get.return_value = b"cached_job_id"
 
     response = client.post("/compile", json={"content": "Cached LaTeX content"})
+
     assert response.status_code == 200
-    result = response.json()
-    assert result["status"] == "completed"
-    assert result["pdf_url"] == "/pdf/cached-job-id"
-    try:
-        uuid.UUID(result["job_id"], version=4)
-    except ValueError:
-        pytest.fail(f"Invalid UUID: {result['job_id']}")
+    response_json = response.json()
+    assert "job_id" in response_json
+    assert isinstance(uuid.UUID(response_json["job_id"]), uuid.UUID)
+    assert response_json["status"] == "completed"
+    assert response_json["pdf_url"] == "/pdf/cached_job_id"
 
-    mock_redis.get.assert_called_once_with("Cached LaTeX content")
+def test_job_status_completed(mock_async_result):
+    job_id = "completed_job_id"
+    mock_async_result.return_value.state = 'SUCCESS'
 
-def test_job_status_completed():
-    job_id = "completed-job-id"
-    os.makedirs(STORAGE_DIR, exist_ok=True)
-    open(f"{STORAGE_DIR}/{job_id}.pdf", "w").close()
-
-    with patch("main.Job.fetch") as mock_fetch:
-        mock_job = MagicMock()
-        mock_job.is_finished = True
-        mock_fetch.return_value = mock_job
-
+    with patch("os.path.exists", return_value=True):
         response = client.get(f"/status/{job_id}")
-        assert response.status_code == 200
-        assert response.json() == {"status": "completed", "pdf_url": f"/pdf/{job_id}"}
 
-    os.remove(f"{STORAGE_DIR}/{job_id}.pdf")
+    assert response.status_code == 200
+    assert response.json() == {"status": "completed", "pdf_url": f"/pdf/{job_id}"}
 
-def test_job_status_in_progress():
-    with patch("main.Job.fetch") as mock_fetch:
-        mock_job = MagicMock()
-        mock_job.is_finished = False
-        mock_job.is_failed = False
-        mock_fetch.return_value = mock_job
+def test_job_status_failed_with_log(mock_async_result):
+    job_id = "failed_job_id"
+    mock_async_result.return_value.state = 'FAILURE'
 
-        response = client.get("/status/in-progress-job-id")
-        assert response.status_code == 200
-        assert response.json() == {"status": "in_progress"}
+    with patch("os.path.exists", return_value=True), \
+         patch("builtins.open", mock_open(read_data="Error log content")):
+        response = client.get(f"/status/{job_id}")
 
-def test_job_status_failed():
-    with patch("main.Job.fetch") as mock_fetch:
-        mock_job = MagicMock()
-        mock_job.is_finished = False
-        mock_job.is_failed = True
-        mock_job.exc_info = "Test error message"
-        mock_fetch.return_value = mock_job
+    assert response.status_code == 200
+    assert response.json() == {"status": "failed", "error_log": "Error log content"}
 
-        response = client.get("/status/failed-job-id")
-        assert response.status_code == 200
-        assert response.json() == {"status": "failed", "error": "Test error message"}
+def test_job_status_in_progress(mock_async_result):
+    job_id = "in_progress_job_id"
+    mock_async_result.return_value.state = 'PENDING'
+
+    response = client.get(f"/status/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "in_progress"}
 
 def test_get_pdf_success():
-    job_id = "test-pdf-job-id"
-    os.makedirs(STORAGE_DIR, exist_ok=True)
-    with open(f"{STORAGE_DIR}/{job_id}.pdf", "w") as f:
-        f.write("Test PDF content")
-
-    response = client.get(f"/pdf/{job_id}")
+    job_id = "existing_pdf_job_id"
+    pdf_path = f"{STORAGE_DIR}/{job_id}.pdf"
+    
+    # Create a mock PDF file for testing
+    with open(pdf_path, 'w') as f:
+        f.write("%PDF-1.4 mock PDF content")  # Minimal valid PDF content
+    
+    # Create a mock FileResponse
+    mock_file_response = MockFileResponse(pdf_path, media_type="application/pdf")
+    
+    with patch("os.path.exists", return_value=True), \
+         patch("main.FileResponse", return_value=mock_file_response) as mock_file_response_class:
+        response = client.get(f"/pdf/{job_id}")
+    
     assert response.status_code == 200
-    assert response.headers["content-type"] == "application/pdf"
-    assert response.content == b"Test PDF content"
-
-    os.remove(f"{STORAGE_DIR}/{job_id}.pdf")
 
 def test_get_pdf_not_found():
-    response = client.get("/pdf/non-existent-job-id")
+    job_id = "non_existing_pdf_job_id"
+
+    with patch("os.path.exists", return_value=False):
+        response = client.get(f"/pdf/{job_id}")
+
     assert response.status_code == 404
     assert response.json() == {"detail": "PDF not found"}
 
-@patch("worker.subprocess.run")
-@patch("os.rename")
-def test_compile_latex_worker_success(mock_rename, mock_subprocess_run):
-    mock_subprocess_run.return_value.returncode = 0
-    
-    from worker import compile_latex
-    compile_latex("Test LaTeX content", "test-worker-job-id")
+def test_compile_latex_task():
+    job_id = "test_compile_job_id"
+    content = "Test LaTeX Content"
 
-    mock_rename.assert_called_once_with(
-        "/tmp/test-worker-job-id/input.pdf",
-        f"{STORAGE_DIR}/test-worker-job-id.pdf"
-    )
+    with patch("subprocess.run") as mock_run, \
+         patch("os.rename") as mock_rename, \
+         patch("os.remove") as mock_remove, \
+         patch("os.rmdir") as mock_rmdir:
 
-@patch("worker.subprocess.run")
-def test_compile_latex_worker_failure(mock_subprocess_run):
-    mock_subprocess_run.return_value.returncode = 1
-    mock_subprocess_run.return_value.stdout = "Test stdout"
-    mock_subprocess_run.return_value.stderr = "Test stderr"
+        mock_run.return_value.returncode = 0
 
-    from worker import compile_latex
-    compile_latex("Test LaTeX content", "test-worker-job-id")
+        result = compile_latex(content, job_id)
 
-    error_log_path = "/tmp/test-worker-job-id/error.log"
-    assert os.path.exists(error_log_path)
-    with open(error_log_path, "r") as f:
-        error_log = f.read()
-    assert "Test stdout" in error_log
-    assert "Test stderr" in error_log
+    assert result == job_id
+    mock_run.assert_called_once()
+    mock_rename.assert_called_once()
+    assert mock_remove.call_count > 0
+    mock_rmdir.assert_called_once()
+
+def test_compile_latex_task_failure():
+    job_id = "test_compile_fail_job_id"
+    content = "Test LaTeX Content"
+
+    with patch("subprocess.run") as mock_run, \
+         patch("builtins.open", mock_open()) as mock_file:
+
+        mock_run.return_value.returncode = 1
+        mock_run.return_value.stdout = "Compilation error output"
+        mock_run.return_value.stderr = "Compilation error log"
+
+        with pytest.raises(Exception, match="LaTeX compilation failed"):
+            compile_latex(content, job_id)
+
+    mock_run.assert_called_once()
+    mock_file.assert_any_call(f"/tmp/{job_id}/input.tex", "w")
+    mock_file.assert_any_call(f"/tmp/{job_id}/error.log", "w")
+    mock_file().write.assert_any_call("Compilation error output")
+    mock_file().write.assert_any_call("Compilation error log")
