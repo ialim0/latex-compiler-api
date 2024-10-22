@@ -7,7 +7,6 @@ import tempfile
 import subprocess
 import shutil
 from typing import Tuple
-from datetime import datetime, timedelta
 
 from app.core.exceptions import LatexCompilationError
 from app.services.cache import RedisCache
