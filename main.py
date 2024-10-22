@@ -15,7 +15,7 @@ class LatexRequest(BaseModel):
 
 class LatexResponse(BaseModel):
     status: str
-    result: Union[str, Dict[str, str]]  # Either URL or error logs
+    result: Union[str, Dict[str, str]] 
 
 class LatexCompiler:
     def __init__(self, output_dir: str = "pdf_output"):

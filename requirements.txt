@@ -1,7 +1,3 @@
 fastapi
 uvicorn
 pydantic
-redis
-rq
-aiofiles
-python-multipart
