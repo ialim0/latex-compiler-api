@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter,  Depends
 from app.models.schemas import LatexRequest, LatexResponse, HealthCheck
 from app.services.latex_compiler import LatexCompiler
 from app.config import get_settings
@@ -11,7 +11,6 @@ settings = get_settings()
 @router.post("/compile", response_model=LatexResponse)
 async def compile_latex(
     request: LatexRequest,
-    background_tasks: BackgroundTasks,
     compiler: LatexCompiler = Depends()
 ):
     job_id = str(uuid.uuid4())

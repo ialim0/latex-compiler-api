@@ -3,7 +3,6 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.responses import Response
 import time
 import logging
-from app.api.routes import router
 
 
 logging.basicConfig(level=logging.INFO)
