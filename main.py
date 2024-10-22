@@ -1,55 +1,89 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
 from pydantic import BaseModel
+import tempfile
 import os
+import subprocess
+from pathlib import Path
+import shutil
 import uuid
-from celery.result import AsyncResult
-from worker import compile_latex
-import redis
+from typing import Optional, Dict, Union
 
 app = FastAPI()
-BASE_DIR = "/home/alim/Personnal/gzendocs/core-zendoc"
-STORAGE_DIR = os.path.join(BASE_DIR, "storage")
-os.makedirs(STORAGE_DIR, exist_ok=True)
-
-redis_client = redis.Redis(host='localhost', port=6379, db=0)
 
 class LatexRequest(BaseModel):
     content: str
 
-@app.post("/compile")
-async def compile_latex_endpoint(request: LatexRequest):
-    job_id = str(uuid.uuid4())
-    cached_pdf = redis_client.get(request.content)
-    if cached_pdf:
-        return {"job_id": job_id, "status": "completed", "pdf_url": f"/pdf/{cached_pdf.decode()}"}
+class LatexResponse(BaseModel):
+    status: str
+    result: Union[str, Dict[str, str]]  # Either URL or error logs
+
+class LatexCompiler:
+    def __init__(self, output_dir: str = "pdf_output"):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(exist_ok=True)
+
+    def compile_latex(self, content: str) -> tuple[bool, str]:
+        # Create a temporary directory for compilation
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            
+            # Write the LaTeX content to a temporary file
+            tex_file = temp_dir_path / "document.tex"
+            tex_file.write_text(content)
+            
+            try:
+                # Run pdflatex twice to resolve references
+                for _ in range(2):
+                    process = subprocess.run(
+                        ["pdflatex", "-interaction=nonstopmode", tex_file.name],
+                        cwd=temp_dir,
+                        capture_output=True,
+                        text=True
+                    )
+                
+                if process.returncode != 0:
+                    return False, process.stdout + process.stderr
+                
+                # Generate unique filename for the PDF
+                pdf_filename = f"{uuid.uuid4()}.pdf"
+                pdf_path = self.output_dir / pdf_filename
+                
+                # Move the generated PDF to the output directory
+                shutil.move(temp_dir_path / "document.pdf", pdf_path)
+                
+                return True, pdf_filename
+                
+            except Exception as e:
+                return False, str(e)
+
+# Initialize the LaTeX compiler
+latex_compiler = LatexCompiler()
+
+@app.post("/compile", response_model=LatexResponse)
+async def compile_latex(request: LatexRequest):
+    success, result = latex_compiler.compile_latex(request.content)
     
-    task = compile_latex.delay(request.content, job_id)
-    return {"job_id": task.id, "status": "queued"}
-
-@app.get("/status/{job_id}")
-async def job_status(job_id: str):
-    task = AsyncResult(job_id)
-    if task.state == 'SUCCESS':
-        if os.path.exists(f"{STORAGE_DIR}/{job_id}.pdf"):
-            return {"status": "completed", "pdf_url": f"/pdf/{job_id}"}
-        else:
-            return {"status": "failed", "error": "PDF not found after job completion"}
-    elif task.state == 'FAILURE':
-        error_log_path = f"/tmp/{job_id}/error.log"
-        if os.path.exists(error_log_path):
-            with open(error_log_path, "r") as f:
-                error_log = f.read()
-            return {"status": "failed", "error_log": error_log}
-        else:
-            return {"status": "failed", "error": str(task.result)}
+    if success:
+        # Construct the URL for the PDF
+        pdf_url = f"/pdf/{result}"
+        return LatexResponse(
+            status="success",
+            result=pdf_url
+        )
     else:
-        return {"status": "in_progress"}
+        return LatexResponse(
+            status="error",
+            result={"error": result}
+        )
 
-@app.get("/pdf/{job_id}")
-async def get_pdf(job_id: str):
-    pdf_path = f"{STORAGE_DIR}/{job_id}.pdf"
-    if os.path.exists(pdf_path):
-        return FileResponse(pdf_path, media_type="application/pdf")
-    else:
-        raise HTTPException(status_code=404, detail="PDF not found")
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
+
+# Serve static files (PDFs)
+from fastapi.staticfiles import StaticFiles
+app.mount("/pdf", StaticFiles(directory="pdf_output"), name="pdf")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
