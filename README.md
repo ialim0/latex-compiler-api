@@ -1,4 +1,4 @@
-# LaTeX Compilation Service
+# Compilation Service
 
 A high-performance, scalable REST API service for compiling LaTeX documents to PDF.
 
