@@ -8,22 +8,33 @@ class Settings(BaseSettings):
     PROJECT_NAME: str
     VERSION: str
     API_V1_STR: str
+
     HOST: str
     PORT: int
     WORKERS: int
     DEBUG: bool
+
     REDIS_URL: str
     REDIS_POOL_SIZE: int
+
     MAX_COMPILER_WORKERS: int
     COMPILATION_TIMEOUT: int
+
     OUTPUT_DIR: str
     CLEANUP_THRESHOLD: int
     FILE_RETENTION_DAYS: int
+
     RATE_LIMIT_PER_MINUTE: int
+
     CORS_ORIGINS: List[str]
+    CORS_ALLOW_METHODS: List[str]
+    CORS_ALLOW_HEADERS: List[str]
+
     ALLOWED_HOSTS: List[str]
+
     LOG_LEVEL: str
     JSON_LOGS: bool
+
     ENABLE_METRICS: bool
 
     class Config:
@@ -32,7 +43,12 @@ class Settings(BaseSettings):
 
         @classmethod
         def parse_env_var(cls, field_name: str, raw_val: str):
-            if field_name in ["CORS_ORIGINS", "ALLOWED_HOSTS"]:
+            if field_name in [
+                "CORS_ORIGINS",
+                "CORS_ALLOW_METHODS",
+                "CORS_ALLOW_HEADERS",
+                "ALLOWED_HOSTS",
+            ]:
                 try:
                     return json.loads(raw_val)
                 except json.JSONDecodeError:
