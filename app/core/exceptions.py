@@ -1,7 +1,13 @@
+# app/core/exceptions.py
+
 from fastapi import HTTPException, status
+import logging
+
+logger = logging.getLogger(__name__)
 
 class LatexCompilationError(HTTPException):
     def __init__(self, detail: str):
+        logger.error(f"LaTeX Compilation Error: {detail}")
         super().__init__(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=detail
@@ -9,6 +15,7 @@ class LatexCompilationError(HTTPException):
 
 class RateLimitExceeded(HTTPException):
     def __init__(self):
+        logger.warning("Rate limit exceeded")
         super().__init__(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Rate limit exceeded"
