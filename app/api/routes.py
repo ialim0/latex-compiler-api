@@ -1,3 +1,4 @@
+#app/api/routes.py
 from fastapi import APIRouter,  Depends
 from app.models.schemas import LatexRequest, LatexResponse, HealthCheck
 from app.services.latex_compiler import LatexCompiler

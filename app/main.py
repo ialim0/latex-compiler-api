@@ -1,8 +1,9 @@
+#main.py
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from prometheus_fastapi_instrumentator import Instrumentator
+from prometheus_fastapi_instrumentator import Instrumentator # type: ignore
 
 from app.api.routes import router
 from app.api.middleware import RequestLoggingMiddleware

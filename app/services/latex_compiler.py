@@ -22,7 +22,7 @@ class LatexCompiler:
         self.cache = RedisCache()
 
     async def compile_latex(self, content: str, job_id: str) -> Tuple[bool, str]:
-        # Check cache first
+        
         cache_key = f"latex:{hash(content)}"
         cached_result = await self.cache.get(cache_key)
         if cached_result:

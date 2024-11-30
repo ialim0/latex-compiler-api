@@ -1,3 +1,4 @@
+#app/core/exceptions.py
 from fastapi import HTTPException, status
 
 class LatexCompilationError(HTTPException):

@@ -1,5 +1,6 @@
 # app/services/cache.py
-import redis.asyncio as redis
+import redis.asyncio as redis # type: ignore
+
 from app.config import settings
 
 class RedisCache:
