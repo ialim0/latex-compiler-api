@@ -1,4 +1,4 @@
-#main.py
+#app/main.py
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,7 +21,6 @@ def create_application() -> FastAPI:
         redoc_url="/api/redoc",
     )
     
-    # Add middleware
     app.add_middleware(GZipMiddleware, minimum_size=1000)
     app.add_middleware(RequestLoggingMiddleware)
     app.add_middleware(
@@ -31,13 +30,10 @@ def create_application() -> FastAPI:
         allow_headers=["*"],
     )
     
-    # Setup routes
     app.include_router(router, prefix=settings.API_V1_STR)
     
-    # Setup static files
     app.mount("/pdf", StaticFiles(directory=settings.OUTPUT_DIR), name="pdf")
     
-    # Setup monitoring
     Instrumentator().instrument(app).expose(app)
     
     return app
