@@ -1,12 +1,14 @@
+from __future__ import annotations
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 import tempfile
-import subprocess
 import shutil
-from typing import Tuple
-from enum import Enum
+from typing import Tuple, Optional
+from functools import cached_property
 
 from app.core.exceptions import LatexCompilationError
 from app.services.cache import RedisCache
@@ -18,124 +20,163 @@ class CompilerType(Enum):
     PDFLATEX = "pdflatex"
     XELATEX = "xelatex"
 
+@dataclass
+class CompilationJob:
+    """Represents a LaTeX compilation job with its metadata."""
+    content: str
+    job_id: str
+    compiler_type: Optional[CompilerType] = None
+    needs_bibtex: bool = False
+    temp_dir: Optional[Path] = None
+    
+    @cached_property
+    def tex_file(self) -> Path:
+        """Get the path to the TeX file."""
+        if not self.temp_dir:
+            raise ValueError("temp_dir must be set before accessing tex_file")
+        return self.temp_dir / "document.tex"
+    
+    @cached_property
+    def pdf_file(self) -> Path:
+        """Get the path to the output PDF file."""
+        if not self.temp_dir:
+            raise ValueError("temp_dir must be set before accessing pdf_file")
+        return self.temp_dir / "document.pdf"
+
+class CompilationStrategy:
+    """Base class for different compilation strategies."""
+    def __init__(self, timeout: int):
+        self.timeout = timeout
+
+    async def compile(self, job: CompilationJob) -> None:
+        raise NotImplementedError
+
+class StandardCompilationStrategy(CompilationStrategy):
+    """Standard compilation strategy for documents without bibliography."""
+    async def compile(self, job: CompilationJob) -> None:
+        await self._run_compiler(job)
+        await self._run_compiler(job)
+
+    async def _run_compiler(self, job: CompilationJob) -> None:
+        cmd = [
+            job.compiler_type.value,
+            "-interaction=nonstopmode",
+            "-halt-on-error",
+            "-output-directory", str(job.temp_dir),
+            str(job.tex_file)
+        ]
+        
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=job.temp_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout)
+            if process.returncode != 0:
+                raise LatexCompilationError(f"{stdout.decode()}\n{stderr.decode()}")
+        except asyncio.TimeoutError:
+            raise LatexCompilationError("Compilation timed out")
+
+class BibTexCompilationStrategy(StandardCompilationStrategy):
+    """Compilation strategy for documents with bibliography."""
+    async def compile(self, job: CompilationJob) -> None:
+        await self._run_compiler(job)
+        await self._run_bibtex(job)
+        await self._run_compiler(job)
+        await self._run_compiler(job)
+
+    async def _run_bibtex(self, job: CompilationJob) -> None:
+        cmd = ["bibtex", job.tex_file.stem]
+        
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=job.temp_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout)
+            if process.returncode != 0:
+                raise LatexCompilationError(f"BibTeX error: {stdout.decode()}\n{stderr.decode()}")
+        except asyncio.TimeoutError:
+            raise LatexCompilationError("BibTeX processing timed out")
+
 class LatexCompiler:
-    def __init__(self):
+    """Main LaTeX compiler service with optimized concurrency handling."""
+    def __init__(self, max_workers: int = None):
         self.output_dir = Path(settings.OUTPUT_DIR)
         self.output_dir.mkdir(exist_ok=True)
-        self.executor = ThreadPoolExecutor(max_workers=settings.MAX_COMPILER_WORKERS)
+        self.executor = ThreadPoolExecutor(max_workers=max_workers or settings.MAX_COMPILER_WORKERS)
         self.cache = RedisCache()
+        self.semaphore = asyncio.Semaphore(max_workers or settings.MAX_COMPILER_WORKERS)
 
-    def _detect_compiler_type(self, content: str) -> CompilerType:
-        """Detect whether to use XeLaTeX based on content analysis."""
-        if any(pattern in content for pattern in [
+    def _analyze_content(self, content: str) -> Tuple[CompilerType, bool]:
+        """Analyze LaTeX content for features and required compiler."""
+        needs_bibtex = any(pattern in content for pattern in [
+            "\\bibliography{",
+            "\\bibliographystyle{",
+            "\\cite{"
+        ])
+        
+        compiler_type = CompilerType.XELATEX if any(pattern in content for pattern in [
             "\\usepackage{fontspec}",
             "\\setmainfont",
             "\\newfontfamily",
             "\\usepackage{xeCJK}",
             "\\usepackage{unicode-math}"
-        ]):
-            return CompilerType.XELATEX
+        ]) else CompilerType.PDFLATEX
         
-        return CompilerType.PDFLATEX
-
-    def _needs_bibtex(self, content: str) -> bool:
-        """Check if the document needs bibliography processing."""
-        return any(pattern in content for pattern in [
-            "\\bibliography{",
-            "\\bibliographystyle{",
-            "\\cite{"
-        ])
+        return compiler_type, needs_bibtex
 
     async def compile_latex(self, content: str, job_id: str) -> Tuple[bool, str]:
+        """Main compilation method with caching and concurrency control."""
         cache_key = f"latex:{hash(content)}"
+        
         cached_result = await self.cache.get(cache_key)
         if cached_result:
             logger.info(f"Cache hit for job {job_id}")
             return True, cached_result.decode() if isinstance(cached_result, bytes) else cached_result
 
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                self.executor,
-                self._compile_in_thread,
-                content,
-                job_id
+        async with self.semaphore:
+            try:
+                compiler_type, needs_bibtex = self._analyze_content(content)
+                
+                job = CompilationJob(
+                    content=content,
+                    job_id=job_id,
+                    compiler_type=compiler_type,
+                    needs_bibtex=needs_bibtex
+                )
+                
+                result = await self._process_job(job)
+                
+                if result[0]:
+                    await self.cache.set(cache_key, result[1])
+                
+                return result
+                
+            except Exception as e:
+                logger.error(f"Compilation error for job {job_id}: {str(e)}")
+                raise LatexCompilationError(str(e))
+
+    async def _process_job(self, job: CompilationJob) -> Tuple[bool, str]:
+        """Process a compilation job with appropriate strategy."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job.temp_dir = Path(temp_dir)
+            job.tex_file.write_text(job.content)
+            
+            strategy = (BibTexCompilationStrategy if job.needs_bibtex else StandardCompilationStrategy)(
+                timeout=settings.COMPILATION_TIMEOUT
             )
             
-            if result[0]:
-                await self.cache.set(cache_key, result[1])
+            await strategy.compile(job)
             
-            return result
-        except Exception as e:
-            logger.error(f"Compilation error for job {job_id}: {str(e)}")
-            raise LatexCompilationError(str(e))
-
-    def _compile_in_thread(self, content: str, job_id: str) -> Tuple[bool, str]:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_dir_path = Path(temp_dir)
-            tex_file = temp_dir_path / "document.tex"
-            tex_file.write_text(content)
+            pdf_filename = f"{job.job_id}.pdf"
+            output_path = self.output_dir / pdf_filename
+            shutil.move(job.pdf_file, output_path)
             
-            compiler_type = self._detect_compiler_type(content)
-            needs_bibtex = self._needs_bibtex(content)
-            
-            logger.info(f"Using {compiler_type.value} for job {job_id}")
-            
-            try:
-                self._run_compiler(compiler_type, tex_file, temp_dir_path)
-
-                if needs_bibtex:
-                    self._run_bibtex(tex_file, temp_dir_path)
-                    self._run_compiler(compiler_type, tex_file, temp_dir_path)
-                    self._run_compiler(compiler_type, tex_file, temp_dir_path)
-                else:
-                    self._run_compiler(compiler_type, tex_file, temp_dir_path)
-
-                pdf_filename = f"{job_id}.pdf"
-                pdf_path = self.output_dir / pdf_filename
-                
-                shutil.move(temp_dir_path / "document.pdf", pdf_path)
-                
-                return True, pdf_filename
-            
-            except subprocess.TimeoutExpired:
-                logger.error(f"Compilation timed out for job {job_id}")
-                raise LatexCompilationError("Compilation timed out")
-            except Exception as e:
-                logger.error(f"Unexpected error during compilation: {str(e)}")
-                raise LatexCompilationError(f"Compilation failed: {str(e)}")
-
-    def _run_compiler(self, compiler_type: CompilerType, tex_file: Path, output_dir: Path):
-        """Run the LaTeX compiler with appropriate options."""
-        cmd = [
-            compiler_type.value,
-            "-interaction=nonstopmode",
-            "-halt-on-error",
-            "-output-directory", str(output_dir),
-            str(tex_file)
-        ]
-        
-        process = subprocess.run(
-            cmd,
-            cwd=output_dir,
-            capture_output=True,
-            text=True,
-            timeout=settings.COMPILATION_TIMEOUT
-        )
-        
-        if process.returncode != 0:
-            logger.error(f"{compiler_type.value} compilation error: {process.stdout + process.stderr}")
-            raise LatexCompilationError(process.stdout + process.stderr)
-
-    def _run_bibtex(self, tex_file: Path, output_dir: Path):
-        """Run BibTeX for bibliography processing."""
-        process = subprocess.run(
-            ["bibtex", tex_file.stem],
-            cwd=output_dir,
-            capture_output=True,
-            text=True,
-            timeout=settings.COMPILATION_TIMEOUT
-        )
-        
-        if process.returncode != 0:
-            logger.error(f"BibTeX error: {process.stdout + process.stderr}")
-            raise LatexCompilationError(process.stdout + process.stderr)
+            return True, pdf_filename
