@@ -6,9 +6,10 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 import tempfile
-import shutil
 from typing import Tuple, Optional
 from functools import cached_property
+import boto3
+from botocore.config import Config
 
 from app.core.exceptions import LatexCompilationError
 from app.services.cache import RedisCache
@@ -99,13 +100,39 @@ class BibTexCompilationStrategy(StandardCompilationStrategy):
         except asyncio.TimeoutError:
             raise LatexCompilationError("BibTeX processing timed out")
 
+class S3Storage:
+    def __init__(self):
+        self.s3_client = boto3.client(
+            's3',
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region_name=settings.AWS_REGION,
+            config=Config(signature_version='s3v4')
+        )
+        self.bucket_name = settings.AWS_BUCKET_NAME
+
+    async def upload_file(self, file_path: Path, key: str) -> str:
+        """Upload a file to S3 and return its URL"""
+        try:
+            await asyncio.to_thread(
+                self.s3_client.upload_file,
+                str(file_path),
+                self.bucket_name,
+                key
+            )
+            
+            url = f"https://{self.bucket_name}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
+            return url
+        except Exception as e:
+            logger.error(f"Failed to upload file to S3: {str(e)}")
+            raise
+
 class LatexCompiler:
     def __init__(self, max_workers: int = None):
-        self.output_dir = Path(settings.OUTPUT_DIR)
-        self.output_dir.mkdir(exist_ok=True)
         self.executor = ThreadPoolExecutor(max_workers=max_workers or settings.MAX_COMPILER_WORKERS)
         self.cache = RedisCache()
         self.semaphore = asyncio.Semaphore(max_workers or settings.MAX_COMPILER_WORKERS)
+        self.s3_storage = S3Storage()
 
     def _analyze_content(self, content: str) -> Tuple[CompilerType, bool]:
         needs_bibtex = any(pattern in content for pattern in [
@@ -165,8 +192,7 @@ class LatexCompiler:
             
             await strategy.compile(job)
             
-            pdf_filename = f"{job.job_id}.pdf"
-            output_path = self.output_dir / pdf_filename
-            shutil.move(job.pdf_file, output_path)
+            s3_key = f"cvs/{job.job_id}.pdf"
+            s3_url = await self.s3_storage.upload_file(job.pdf_file, s3_key)
             
-            return True, pdf_filename
+            return True, s3_url
