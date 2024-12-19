@@ -22,7 +22,6 @@ class CompilerType(Enum):
 
 @dataclass
 class CompilationJob:
-    """Represents a LaTeX compilation job with its metadata."""
     content: str
     job_id: str
     compiler_type: Optional[CompilerType] = None
@@ -31,20 +30,17 @@ class CompilationJob:
     
     @cached_property
     def tex_file(self) -> Path:
-        """Get the path to the TeX file."""
         if not self.temp_dir:
             raise ValueError("temp_dir must be set before accessing tex_file")
         return self.temp_dir / "document.tex"
     
     @cached_property
     def pdf_file(self) -> Path:
-        """Get the path to the output PDF file."""
         if not self.temp_dir:
             raise ValueError("temp_dir must be set before accessing pdf_file")
         return self.temp_dir / "document.pdf"
 
 class CompilationStrategy:
-    """Base class for different compilation strategies."""
     def __init__(self, timeout: int):
         self.timeout = timeout
 
@@ -52,7 +48,6 @@ class CompilationStrategy:
         raise NotImplementedError
 
 class StandardCompilationStrategy(CompilationStrategy):
-    """Standard compilation strategy for documents without bibliography."""
     async def compile(self, job: CompilationJob) -> None:
         await self._run_compiler(job)
         await self._run_compiler(job)
@@ -81,7 +76,6 @@ class StandardCompilationStrategy(CompilationStrategy):
             raise LatexCompilationError("Compilation timed out")
 
 class BibTexCompilationStrategy(StandardCompilationStrategy):
-    """Compilation strategy for documents with bibliography."""
     async def compile(self, job: CompilationJob) -> None:
         await self._run_compiler(job)
         await self._run_bibtex(job)
@@ -106,7 +100,6 @@ class BibTexCompilationStrategy(StandardCompilationStrategy):
             raise LatexCompilationError("BibTeX processing timed out")
 
 class LatexCompiler:
-    """Main LaTeX compiler service with optimized concurrency handling."""
     def __init__(self, max_workers: int = None):
         self.output_dir = Path(settings.OUTPUT_DIR)
         self.output_dir.mkdir(exist_ok=True)
@@ -115,7 +108,6 @@ class LatexCompiler:
         self.semaphore = asyncio.Semaphore(max_workers or settings.MAX_COMPILER_WORKERS)
 
     def _analyze_content(self, content: str) -> Tuple[CompilerType, bool]:
-        """Analyze LaTeX content for features and required compiler."""
         needs_bibtex = any(pattern in content for pattern in [
             "\\bibliography{",
             "\\bibliographystyle{",
@@ -133,7 +125,6 @@ class LatexCompiler:
         return compiler_type, needs_bibtex
 
     async def compile_latex(self, content: str, job_id: str) -> Tuple[bool, str]:
-        """Main compilation method with caching and concurrency control."""
         cache_key = f"latex:{hash(content)}"
         
         cached_result = await self.cache.get(cache_key)
@@ -164,7 +155,6 @@ class LatexCompiler:
                 raise LatexCompilationError(str(e))
 
     async def _process_job(self, job: CompilationJob) -> Tuple[bool, str]:
-        """Process a compilation job with appropriate strategy."""
         with tempfile.TemporaryDirectory() as temp_dir:
             job.temp_dir = Path(temp_dir)
             job.tex_file.write_text(job.content)

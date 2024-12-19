@@ -1,7 +1,6 @@
 # app/main.py
 import os
 import multiprocessing
-import gunicorn.app.base
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
