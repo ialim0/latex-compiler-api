@@ -1,3 +1,5 @@
+import asyncio
+from asyncio.log import logger
 from fastapi import APIRouter, Depends, HTTPException, Header
 from typing import Optional
 from app.models.schemas import LatexRequest, LatexResponse, HealthCheck
@@ -70,37 +72,7 @@ async def compile_latex(
             detail=f"An unexpected error occurred: {str(e)}"
         )
 
-@router.get("/documents/{s3_key}/url")
-async def refresh_document_url(
-    s3_key: str,
-    user_id: str = Depends(validate_user_id),
-    compiler: LatexCompiler = Depends()
-):
-    """
-    Generate a new presigned URL for an existing document
-    
-    Args:
-        s3_key: The S3 key of the document
-        user_id: Authenticated user's ID from request header
-        compiler: LaTeX compiler instance
-    
-    Returns:
-        Dict containing new presigned URL and expiration time
-    """
-    try:
-        # Verify the requested key belongs to the user
-        expected_prefix = f"cvs/{user_id}/"
-        if not s3_key.startswith(expected_prefix):
-            raise HTTPException(
-                status_code=403,
-                detail="Access denied to this document"
-            )
-            
-        new_url = await compiler.s3_storage.get_presigned_url(s3_key)
-        return {
-            "url": new_url,
-            "expires_in": 3600
-        }
+
         
     except Exception as e:
         logger.error(f"Error refreshing document URL: {str(e)}")
@@ -113,7 +85,6 @@ async def refresh_document_url(
 async def health_check(compiler: LatexCompiler = Depends()):
     """Check the health status of the compiler service and its dependencies"""
     try:
-        # Test S3 connectivity
         s3_status = "healthy"
         try:
             await asyncio.to_thread(compiler.s3_storage.s3_client.list_buckets)
