@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 import tempfile
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 from functools import cached_property
 import boto3
 from botocore.config import Config
@@ -25,6 +25,7 @@ class CompilerType(Enum):
 class CompilationJob:
     content: str
     job_id: str
+    user_id: str  # Added user_id for path isolation
     compiler_type: Optional[CompilerType] = None
     needs_bibtex: bool = False
     temp_dir: Optional[Path] = None
@@ -111,20 +112,52 @@ class S3Storage:
         )
         self.bucket_name = settings.AWS_BUCKET_NAME
 
-    async def upload_file(self, file_path: Path, key: str) -> str:
-        """Upload a file to S3 and return its URL"""
+    async def upload_file(self, file_path: Path, user_id: str, job_id: str) -> Dict[str, str]:
+        """Upload a file to S3 and return its key and presigned URL"""
         try:
+            # Use user-specific path for security
+            s3_key = f"cvs/{user_id}/{job_id}.pdf"
+            
+            # Set server-side encryption
+            extra_args = {
+                'ServerSideEncryption': 'AES256',
+                'ContentType': 'application/pdf'
+            }
+            
             await asyncio.to_thread(
                 self.s3_client.upload_file,
                 str(file_path),
                 self.bucket_name,
-                key
+                s3_key,
+                ExtraArgs=extra_args
             )
             
-            url = f"https://{self.bucket_name}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
-            return url
+            # Generate presigned URL
+            presigned_url = await self.get_presigned_url(s3_key)
+            
+            return {
+                "key": s3_key,
+                "url": presigned_url
+            }
         except Exception as e:
             logger.error(f"Failed to upload file to S3: {str(e)}")
+            raise
+
+    async def get_presigned_url(self, key: str, expiration: int = 3600) -> str:
+        """Generate a presigned URL for the given S3 key"""
+        try:
+            url = await asyncio.to_thread(
+                self.s3_client.generate_presigned_url,
+                'get_object',
+                Params={
+                    'Bucket': self.bucket_name,
+                    'Key': key
+                },
+                ExpiresIn=expiration
+            )
+            return url
+        except Exception as e:
+            logger.error(f"Failed to generate presigned URL: {str(e)}")
             raise
 
 class LatexCompiler:
@@ -151,13 +184,16 @@ class LatexCompiler:
         
         return compiler_type, needs_bibtex
 
-    async def compile_latex(self, content: str, job_id: str) -> Tuple[bool, str]:
-        cache_key = f"latex:{hash(content)}"
+    async def compile_latex(self, content: str, job_id: str, user_id: str) -> Tuple[bool, Dict[str, str]]:
+        cache_key = f"latex:{user_id}:{hash(content)}"
         
         cached_result = await self.cache.get(cache_key)
         if cached_result:
             logger.info(f"Cache hit for job {job_id}")
-            return True, cached_result.decode() if isinstance(cached_result, bytes) else cached_result
+            cached_data = cached_result.decode() if isinstance(cached_result, bytes) else cached_result
+            # Regenerate presigned URL even for cached results
+            presigned_url = await self.s3_storage.get_presigned_url(cached_data)
+            return True, {"key": cached_data, "url": presigned_url}
 
         async with self.semaphore:
             try:
@@ -166,6 +202,7 @@ class LatexCompiler:
                 job = CompilationJob(
                     content=content,
                     job_id=job_id,
+                    user_id=user_id,
                     compiler_type=compiler_type,
                     needs_bibtex=needs_bibtex
                 )
@@ -173,7 +210,7 @@ class LatexCompiler:
                 result = await self._process_job(job)
                 
                 if result[0]:
-                    await self.cache.set(cache_key, result[1])
+                    await self.cache.set(cache_key, result[1]["key"])
                 
                 return result
                 
@@ -181,7 +218,7 @@ class LatexCompiler:
                 logger.error(f"Compilation error for job {job_id}: {str(e)}")
                 raise LatexCompilationError(str(e))
 
-    async def _process_job(self, job: CompilationJob) -> Tuple[bool, str]:
+    async def _process_job(self, job: CompilationJob) -> Tuple[bool, Dict[str, str]]:
         with tempfile.TemporaryDirectory() as temp_dir:
             job.temp_dir = Path(temp_dir)
             job.tex_file.write_text(job.content)
@@ -192,7 +229,10 @@ class LatexCompiler:
             
             await strategy.compile(job)
             
-            s3_key = f"cvs/{job.job_id}.pdf"
-            s3_url = await self.s3_storage.upload_file(job.pdf_file, s3_key)
+            result = await self.s3_storage.upload_file(
+                job.pdf_file,
+                job.user_id,
+                job.job_id
+            )
             
-            return True, s3_url
+            return True, result

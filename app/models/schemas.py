@@ -22,14 +22,38 @@ class LatexRequest(BaseModel):
             }
         }
 
+class DocumentResult(BaseModel):
+    url: str = Field(
+        ...,
+        description="Presigned URL for accessing the compiled PDF"
+    )
+    key: str = Field(
+        ...,
+        description="S3 key for the compiled document"
+    )
+    expires_in: int = Field(
+        default=3600,
+        description="Time in seconds until the presigned URL expires"
+    )
+
+class ErrorResult(BaseModel):
+    error: str = Field(
+        ...,
+        description="Error message describing what went wrong"
+    )
+    details: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Additional error details if available"
+    )
+
 class LatexResponse(BaseModel):
     status: str = Field(
         ...,
         description="Status of the compilation (success/error)"
     )
-    result: Union[str, Dict[str, Any]] = Field(
+    result: Union[DocumentResult, ErrorResult] = Field(
         ...,
-        description="S3 URL of the compiled PDF or error details"
+        description="Either successful document information or error details"
     )
     job_id: str = Field(
         ...,
@@ -39,12 +63,16 @@ class LatexResponse(BaseModel):
         default_factory=datetime.utcnow,
         description="Timestamp of when the response was created"
     )
-
+    
     class Config:
         json_schema_extra = {
             "example": {
                 "status": "success",
-                "result": "https://your-bucket.s3.region.amazonaws.com/pdfs/123e4567-e89b-12d3-a456-426614174000.pdf",
+                "result": {
+                    "url": "https://your-bucket.s3.region.amazonaws.com/pdfs/user123/123e4567.pdf",
+                    "key": "cvs/user123/123e4567.pdf",
+                    "expires_in": 3600
+                },
                 "job_id": "123e4567-e89b-12d3-a456-426614174000",
                 "created_at": "2024-12-19T10:00:00.000Z"
             }
@@ -75,7 +103,7 @@ class HealthCheck(BaseModel):
         None,
         description="Error message if any component is unhealthy"
     )
-
+    
     class Config:
         json_schema_extra = {
             "example": {
